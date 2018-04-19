@@ -11,7 +11,8 @@ int redPin = D0;
 unsigned long timeElapsed;
 unsigned long firstTime;
 unsigned long logTime;
-unsigned long prevTimeElapsed;
+unsigned long secTime = 0 ;
+unsigned long prevTimeElapsed = 0;
 
 //SD Card Initialization:
 SdFat SD;
@@ -53,7 +54,8 @@ uint16_t pm10Sum;
 uint16_t pm25Sum;
 uint16_t pm100Sum;
 int PMerrors = 0;
-uint8_t buf[24];
+uint8_t buf[48];
+char* charbuf;
 
 uint16_t TPM01ValueAvg;
 uint16_t TPM2_5ValueAvg;
@@ -91,13 +93,41 @@ float zeroNO, aeNO, sensitivityNO, zeroCO, aeCO, sensitivityCO, zeroNO2, aeNO2, 
 SYSTEM_THREAD(ENABLED); // before the setup() method
 
 void setup() {
-    Serial.begin(9600);
-    Serial1.begin(9600);
+  Serial.begin(9600);
+  Serial1.begin(9600);
 
-    //Timing
-    firstTime = millis();
-    prevTimeElapsed = 0;
-    int SDmarker=1;
+  //Setup SD Card:
+  Serial.print("Initializing SD card...");
+  while(!SD.begin(chipSelect, SPI_HALF_SPEED)) {
+    Serial.println("SD init fail");
+    digitalWrite(redPin, HIGH);
+    delay(300);
+    digitalWrite(redPin, LOW);
+    delay(300);
+  }
+  Serial.println("done.");
+
+  firstDataString = Time.timeStr();
+  String firstStr = boxLabel + "...New Logging Session..." + firstDataString;
+  sdLog(buffer, firstStr);
+  String infoStr = "yyyy/mm/dd, hh:mm:ss, TPM1, TPM2.5, TPM10, PM1, PM2.5, PM10, CO2, TempC, Humidity, NO, CO, NO2, O3";
+  // String infoStr = "yyyy/mm/dd, hh:mm:ss, TPM1, TPM2.5, TPM10, PM1, PM2.5, PM10";
+  sdLog(buffer, infoStr);
+
+  //Setup Alphasensor:
+  /* pinMode(S0, OUTPUT);
+  pinMode(S1, OUTPUT); */
+
+  //Initialize COZIR
+  /* Serial.print("Initializing COZIR...");
+  pinMode(A0, INPUT);
+  Serial.println("done"); */
+
+  //Timing
+  firstTime = millis();
+  secTime = millis();
+  sampleSize = 0;
+  int SDmarker=1;
 }
 
 bool done=true;
@@ -106,30 +136,43 @@ int fileNum=0;
 
 void loop()
 {
-   sampleSize++;
-   Serial.println(Time.timeStr());
-   getPMValues();
-   PMPrint();
-   TimeElapseCalculation();
-   Serial.print("\n");
+  if(millis()-secTime>1000)
+  {
+    sampleSize++;
+    Serial.println(Time.timeStr());
+    getPMValues();
+    PMPrint();
+    TimeElapseCalculation();
+    Serial.print("\n");
 
-     if (timeElapsed > 60000) {       //Take Avg Every Minute
-       AverageCalculation();
-       dataString = Time.timeStr();
-       dataString += " "+String(TPM01ValueAvg) + ", " + String(TPM2_5ValueAvg) + ", " + String(TPM10ValueAvg);
-       dataString += ", " + String(PM01ValueAvg) + ", " + String(PM2_5ValueAvg) + ", " + String(PM10ValueAvg);
-       // dataString += ", " + String(CO2concAvg, 2) + ", " + String(tempCavg, 2) + ", " + String(humidityAvg, 2);
-       // dataString += ", " + String(NO2avg) + ", " + String(O3avg);
+    if (timeElapsed > 60000) {       //Take Avg Every Minute
+      AverageCalculation();
+      dataString = Time.timeStr();
+      dataString += " "+String(TPM01ValueAvg) + ", " + String(TPM2_5ValueAvg) + ", " + String(TPM10ValueAvg);
+      dataString += ", " + String(PM01ValueAvg) + ", " + String(PM2_5ValueAvg) + ", " + String(PM10ValueAvg);
+      // dataString += ", " + String(CO2concAvg, 2) + ", " + String(tempCavg, 2) + ", " + String(humidityAvg, 2);
+      // dataString += ", " + String(NO2avg) + ", " + String(O3avg);
 
-       Serial.println("--------MINUTE AVERAGE below------------");
-       Serial.println(dataString);
-       Serial.println("----------------------------------------");
-       PublishPM();
-       firstTime = logTime;
-       ReSet(true);
-       done=false;
-     }
-  delay(1000);
+      Serial.println("--------MINUTE AVERAGE below------------");
+      Serial.println(dataString);
+      Serial.println("----------------------------------------");
+      PublishPM();
+      //check if log is successful:
+      SDmarker = sdLog(buffer, dataString);
+      while (!SDmarker) {
+        Serial.println("Card failed, or not present");  // keep flashing LED
+        digitalWrite(redPin, HIGH);
+        delay(300);
+        digitalWrite(redPin, LOW);
+        delay(300);
+      }
+      //Reset firstTime to the last logTime value
+      firstTime = logTime;
+      ReSet(true);
+      done=false;
+    }
+    secTime = millis();
+  }
 }
 
 void readSD()
@@ -153,6 +196,9 @@ void readSD()
 // ***Log values into SD Card ***//
 int sdLog(const char* fileName, String stringToWrite) {
   int marker;
+  Serial.print("Filename is :");
+  Serial.print(fileName);
+  Serial.println("Writing string: " + stringToWrite);
   File myFile = SD.open(fileName, FILE_WRITE);
 
   // if the file opened okay, write to it:
@@ -166,6 +212,7 @@ int sdLog(const char* fileName, String stringToWrite) {
     Serial.print("\n");
     marker = 1;
   } else {
+
     Serial.print("error opening ");
     Serial.println(fileName);
     marker = 0;
@@ -176,17 +223,21 @@ int sdLog(const char* fileName, String stringToWrite) {
 
 //***To Get Value from PM Sensor***//
 bool getPMValues() {
-  int idx;
+  int idx = 0;
   bool hasPm25Value = false;
   int timeout = 200;
   String printout = "";
   bool flag = false;
   while (!hasPm25Value) {
-    idx = 0;
-    memset(buf, 0, 24);
-    while (Serial1.available()) {
-      buf[idx++] = Serial1.read();
+    memset(buf, 0, sizeof(uint8_t)*48);
+    while (Serial1.available()) { /* This gives us problems, why? */
+        buf[idx++] = Serial1.read();
     }
+    // Serial1.readBytes(charbuf, 24);
+    // for(int i=0;i<24;i++)
+    // {
+    //   buf[i]=(int)charbuf[i]-48;
+    // }
 
     if (buf[0] == 0x42 && buf[1] == 0x4d) {
       pm25 = ( buf[12] << 8 ) | buf[13];
@@ -196,7 +247,7 @@ bool getPMValues() {
       tpm25 = ( buf[6] << 8 ) | buf[7];
       tpm100 = ( buf[8] << 8 ) | buf[9];
 
-      if (checkValue(buf, 24)) {
+      if (checkValue(buf, 48)) {
         flag = true;
         // tpm10Sum += tpm10;  tpm25Sum += tpm25;  tpm100Sum += tpm100;
         // pm10Sum += pm10; pm10Sum += pm25; pm100Sum += pm100;
@@ -211,12 +262,12 @@ bool getPMValues() {
       pm10Sum += pm10; pm25Sum += pm25; pm100Sum += pm100;
 
       // Debbugging Tool: Print out 24 bytes PM data (See communication protocol for details)
-            // for (int j = 0; j < 24; j++) {
-            //   printout = printout + " " + buf[j];
-            // }
-            // Serial.print(printout);
-            // Serial.print("\n");
-            // Serial.print("\n");
+      // for (int j = 0; j < 24; j++) {
+      //   printout = printout + " " + buf[j];
+      // }
+      // Serial.print(printout);
+      // Serial.print("\n");
+      // Serial.print("\n");
     }
     timeout--;
     if (timeout < 0) {
@@ -227,7 +278,7 @@ bool getPMValues() {
 }
 
 // ***Checksum for PM values ***//
-int checkValue(uint8_t thebuf[24], int leng)
+int checkValue(uint8_t thebuf[48], int leng)
 {
   char receiveflag = 0;
   int receiveSum = 0;
@@ -267,75 +318,75 @@ void PMPrint() {
 }
 
 void getAlpha() {
-    if (alphaCount==0) {
-        digitalWrite(S0,LOW);
-        digitalWrite(S1,LOW);
-        workNO2 = analogRead(alphaPin)* 4.9;
-        alphaCount++;
+  if (alphaCount==0) {
+    digitalWrite(S0,LOW);
+    digitalWrite(S1,LOW);
+    workNO2 = analogRead(alphaPin)* 4.9;
+    alphaCount++;
 
-    } else if (alphaCount==1) {
-        digitalWrite(S0,HIGH);
-        digitalWrite(S1,LOW);
-        auxNO2 = analogRead(alphaPin)* 4.9;
-        alphaCount++;
-    } else if (alphaCount==2) {
-        digitalWrite(S0,LOW);
-        digitalWrite(S1,HIGH);
-        workO3 = analogRead(alphaPin)* 4.9;
-        alphaCount++;
-    } else {
-        digitalWrite(S0,HIGH);
-        digitalWrite(S1,HIGH);
-        auxO3 = analogRead(alphaPin)* 4.9;
+  } else if (alphaCount==1) {
+    digitalWrite(S0,HIGH);
+    digitalWrite(S1,LOW);
+    auxNO2 = analogRead(alphaPin)* 4.9;
+    alphaCount++;
+  } else if (alphaCount==2) {
+    digitalWrite(S0,LOW);
+    digitalWrite(S1,HIGH);
+    workO3 = analogRead(alphaPin)* 4.9;
+    alphaCount++;
+  } else {
+    digitalWrite(S0,HIGH);
+    digitalWrite(S1,HIGH);
+    auxO3 = analogRead(alphaPin)* 4.9;
 
-        // //Uncomment to debug alphasensor values:
-        // Serial.print("workNO2 = ");
-        // Serial.println(workNO2);
-        // Serial.print("auxNO2 = ");
-        // Serial.println(auxNO2);
-        // Serial.print("workO3 = ");
-        // Serial.println(workO3);
-        // Serial.print("auxO3 = ");
-        // Serial.println(auxO3);
+    // //Uncomment to debug alphasensor values:
+    // Serial.print("workNO2 = ");
+    // Serial.println(workNO2);
+    // Serial.print("auxNO2 = ");
+    // Serial.println(auxNO2);
+    // Serial.print("workO3 = ");
+    // Serial.println(workO3);
+    // Serial.print("auxO3 = ");
+    // Serial.println(auxO3);
 
-         NO2 = ((workNO2 - 302) - (auxNO2 - 295)) / 0.264;
-         O3 = (((workO3 - 400) - (auxO3 - 406)) - NO2 * 0.261) / 0.349;
-         Serial.print("NO2 = ");
-         Serial.print(NO2);
-         Serial.print(" O3 = ");
-         Serial.print(O3);
+    NO2 = ((workNO2 - 302) - (auxNO2 - 295)) / 0.264;
+    O3 = (((workO3 - 400) - (auxO3 - 406)) - NO2 * 0.261) / 0.349;
+    Serial.print("NO2 = ");
+    Serial.print(NO2);
+    Serial.print(" O3 = ");
+    Serial.print(O3);
 
-        NO2sum += NO2;
-        O3sum += O3;
+    NO2sum += NO2;
+    O3sum += O3;
 
-        alphaCount=0;
-    }
+    alphaCount=0;
+  }
 }
 
-void getSHT1X() {
-  SHT1x sht1x(dataPin, clkPin);
-  tempC = sht1x.readTemperatureC();
-  if (tempC < 0 || tempC > 50) {
-    tempCerrors++;
-  }
-  else {
-    tempCsum += tempC;
-  }
-  humidity = sht1x.readHumidity();
-  if (humidity < 0 || humidity > 100) {
-    humErrors++;
-  }
-  else {
-    humiditySum += humidity;
-  }
-  Serial.print(" Temp = ");
-  Serial.print(tempC);
-  Serial.print(" ");
-  Serial.print("C");
-  Serial.print(" Humidity = ");
-  Serial.print(humidity);
-  Serial.println("%");
-}
+// void getSHT1X() {
+//   SHT1x sht1x(dataPin, clkPin);
+//   tempC = sht1x.readTemperatureC();
+//   if (tempC < 0 || tempC > 50) {
+//     tempCerrors++;
+//   }
+//   else {
+//     tempCsum += tempC;
+//   }
+//   humidity = sht1x.readHumidity();
+//   if (humidity < 0 || humidity > 100) {
+//     humErrors++;
+//   }
+//   else {
+//     humiditySum += humidity;
+//   }
+//   Serial.print(" Temp = ");
+//   Serial.print(tempC);
+//   Serial.print(" ");
+//   Serial.print("C");
+//   Serial.print(" Humidity = ");
+//   Serial.print(humidity);
+//   Serial.println("%");
+// }
 
 void getCO2Values() {
   val = analogRead(A0);
@@ -357,6 +408,7 @@ void TimeElapseCalculation() {
   Serial.print("Time from last measurement: ");
   Serial.println(intervalTime);
   prevTimeElapsed = timeElapsed;
+  // prevTimeElapsed = millis();
 }
 
 void AverageCalculation() {
@@ -414,12 +466,12 @@ void ReSet(boolean PMReSet) {
 }
 
 byte myFTP () {
-#ifdef FTPWRITE
+  #ifdef FTPWRITE
   fh2 = SD.open(buffer,FILE_READ);
-#else
+  #else
   SD.remove(buffer);
   fh2 = SD.open(buffer,FILE_WRITE);
-#endif
+  #endif
 
   if(!fh2)
   {
@@ -427,14 +479,14 @@ byte myFTP () {
     return 0;
   }
 
-#ifndef FTPWRITE
+  #ifndef FTPWRITE
   if(!fh2.seek(0))
   {
     Serial.println("Rewind fail");
     fh2.close();
     return 0;
   }
-#endif
+  #endif
 
   Serial.println("SD opened");
 
@@ -489,13 +541,13 @@ byte myFTP () {
     return 0;
   }
 
-#ifdef FTPWRITE
+  #ifdef FTPWRITE
   client.print("STOR ");
   client.println(buffer);
-#else
+  #else
   client.print("RETR ");
   client.println(buffer);
-#endif
+  #endif
 
   if(!eRcv())
   {
@@ -503,7 +555,7 @@ byte myFTP () {
     return 0;
   }
 
-#ifdef FTPWRITE
+  #ifdef FTPWRITE
   Serial.println("Writing");
 
   byte clientBuf[64];
@@ -523,7 +575,7 @@ byte myFTP () {
 
   if(clientCount > 0) dclient.write(clientBuf,clientCount);
 
-#else
+  #else
   while(dclient.connected())
   {
     while(dclient.available())
@@ -534,7 +586,7 @@ byte myFTP () {
     }
     Serial.println("looping");
   }
-#endif
+  #endif
 
   dclient.stop();
   Serial.println("Data disconnected");
@@ -601,10 +653,10 @@ void efail()
 }
 
 void fileChange(int Num) {
-    int tens=floor(Num/10);
-    int digit=Num%10;
-    buffer[6]=tens+48;
-    buffer[7]=digit+48;
+  int tens=floor(Num/10);
+  int digit=Num%10;
+  buffer[6]=tens+48;
+  buffer[7]=digit+48;
 }
 
 void TCPrintPM(){
